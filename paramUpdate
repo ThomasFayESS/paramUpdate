@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+
+# parse input file for (valid) PVs
+
+# check EPICS tools available
+declare -a arrTools=(caget caput pvget pvput)
+for tool in ${arrTools[@]}
+do
+    hasTool=$(which $tool 2>&1)
+    if [[ $hasTool == *"which: no"* ]]; then
+        echo "Missing $tool, check environment settings."
+        exit 1
+    fi
+done
+
+
+#dummy PV array for testing 
+declare -a arrPVs=("ai00.HIHI" "ai01.HIHI" "ai02.HIHI")
+declare -a arrCurrentValues=()
+declare -a arrNewValues=()
+i=0
+regExp='^[-]?[0-9]+$'
+
+echo "Enter new value for each parameter."
+echo "Default to current value by hitting enter."
+echo ""
+echo "PV_ID"
+
+maxLenPV=59 # EPICS PV Limit is 60 eleement char array in C-language, that is 59 characters plus null terminator.
+
+upperBound_arrPVs=${#arrPVs[@]}
+let upperBound_arrPVs=upperBound_arrPVs-1
+
+function updateParam
+{
+    ID_PV=$1
+    
+    PV=${arrPVs["$ID_PV"]}
+    # PV length check (discard any field prefix)
+    justPV=${PV%.*}
+    lenPV=${#justPV}
+
+    if [[ "$lenPV" -gt 59 ]]; then
+        echo "PV $PV too long, exiting"
+        exit 1
+    fi
+
+    currentValue=$(caget -t -w 0.2 "$PV" 2>&1)
+    if [[ $currentValue == "Channel connect timed out: '$PV' not found." ]]; then
+        echo "Timed out reading $PV, exiting";
+        exit 2
+    fi
+
+    printf "$ID_PV\tPV: $PV\n"
+    printf "$ID_PV\tcurrent value: $currentValue; newValue: "
+    # check PV is valid.
+    read newValue
+
+    [[ -z $newValue ]] && newValue=$currentValue
+
+    while ! [[ $newValue =~ $regExp ]]
+    do
+        echo "Invalid input, retry:"
+        read newValue
+    done
+
+    arrCurrentValues[i]=$currentValue
+    arrNewValues[i]=$newValue
+}
+
+function displayParam {
+    PV_ID=$1
+    printf "$PV_ID\t ${arrPVs[$PV_ID]}\n"
+    printf "$PV_ID\t current value: ${arrCurrentValues[$PV_ID]}; new value: ${arrNewValues[$PV_ID]};\n"
+
+}
+for PV in ${arrPVs[@]}
+do
+    updateParam $i
+    let i=i+1  
+done
+
+    #[ ${arrNewValues[i]} -gt ${arrCurrentValues[i]} ] && indicator="↑ increases parameter value" 
+    #[ "$arrNewValues[i]" -lt "$arrCurrentValues[i]" ] && indicator="↓ decreases parameter value"
+
+i=0
+while [[ $request != "all" ]]
+do
+    j=0
+    echo ""
+    echo "Pending parameter updates:"
+    for PV in ${arrPVs[@]}
+    do
+        displayParam $j
+        let j=j+1
+    done    
+
+    echo ""
+    echo "Enter 'all' to write all parameters to IOC."
+    echo -n "Or enter PV_ID integer to edit before writing: "
+    read request
+    [ $request == "all" ] && break
+    while ! [[ $request =~ $regExp ]]
+    do        
+        echo -n "invalid entry, enter 'all' or ID of parameter" 
+        read request
+        [[ "$request" == "all" ]] && break
+    done
+    while ! [[ $request -ge 0 ]] || ! [[ $request -le $upperBound_arrPVs ]] && ! [[ $request == "done" ]]
+    do
+        echo -n "PV ID not found, try again: "
+        read request
+    done
+
+    ! [[ $request == "done" ]] && updateParam "$request"
+
+done
+
+if [ "$request" == "all" ]; then
+    i=0
+    for PV in ${arrPVs[@]}
+    do
+        result=$(caput "$PV" ${arrNewValues[i]} 2>&1)
+        if [ "$result" == "Channel connect timed out: '$PV' not found." ]; then
+            echo "Failed to write $PV - timeout"
+        fi
+    let i=i+1 
+    done
+fi
+
+
+#Check parameter update
+
+echo ""
+echo "New parameter settings:"
+i=0
+for PV in ${arrPVs[@]}
+do
+    checkValue=$(caget -t "$PV")
+    echo "$PV updated to $checkValue"
+done
